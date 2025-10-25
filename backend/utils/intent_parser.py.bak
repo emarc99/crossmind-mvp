@@ -1,0 +1,217 @@
+"""
+Intent Parser
+Uses OpenAI GPT-4 to parse natural language trading commands.
+Extracts action, chains, tokens, and amounts from user messages.
+"""
+
+import json
+import logging
+from typing import Dict, Optional
+from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
+
+# System prompt for GPT-4
+INTENT_PARSER_PROMPT = """You are an expert cryptocurrency trading assistant.
+Your job is to parse user messages about cross-chain trading and extract the intent.
+
+Analyze the user message and extract:
+- action: "bridge" (transfer same token to different chain), "swap" (exchange tokens on same chain), or "bridge_and_swap" (bridge + swap)
+- from_chain: source blockchain (ethereum, polygon, arbitrum, base, optimism)
+- from_token: source token (ETH, USDC, USDT, WETH)
+- to_chain: destination blockchain (only required for bridge/bridge_and_swap)
+- to_token: destination token (only required for swap/bridge_and_swap)
+- amount: numeric amount to trade
+
+Supported chains: ethereum, polygon, arbitrum, base, optimism
+Supported tokens: ETH, USDC, USDT, WETH
+
+Examples:
+- "send 100 USDC from ethereum to polygon" → bridge
+- "swap 50 USDC for USDT on polygon" → swap
+- "bridge 100 USDC from eth to polygon and convert to USDT" → bridge_and_swap
+- "move 0.1 ETH to base" → bridge
+
+Return a JSON object with the extracted fields. If a field is missing, set it to null.
+Always include confidence (0-1) indicating how confident you are in the parsing."""
+
+class IntentParser:
+    """Parse natural language trading intents using GPT-4."""
+
+    def __init__(self, api_key: str):
+        self.client = AsyncOpenAI(api_key=api_key)
+        logger.info("Initialized Intent Parser with GPT-4")
+
+    async def parse_message(self, message: str) -> Dict:
+        """
+        Parse a user message to extract trading intent.
+
+        Args:
+            message: User's natural language message
+
+        Returns:
+            Dict with parsed intent or error
+        """
+        try:
+            response = await self.client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": INTENT_PARSER_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": message
+                    }
+                ],
+                temperature=0.7,
+                max_tokens=500
+            )
+
+            # Extract JSON from response
+            response_text = response.choices[0].message.content.strip()
+
+            # Try to parse as JSON
+            try:
+                parsed = json.loads(response_text)
+                parsed["raw_message"] = message
+                parsed["status"] = "success"
+                return parsed
+            except json.JSONDecodeError:
+                # Try to extract JSON from response
+                import re
+                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    parsed["raw_message"] = message
+                    parsed["status"] = "success"
+                    return parsed
+
+                return {
+                    "error": "Could not parse response as JSON",
+                    "raw_response": response_text,
+                    "raw_message": message,
+                    "status": "error"
+                }
+
+        except Exception as e:
+            logger.error(f"Error parsing message: {e}")
+            return {
+                "error": str(e),
+                "raw_message": message,
+                "status": "error"
+            }
+
+    def validate_intent(self, intent: Dict) -> tuple[bool, str]:
+        """
+        Validate parsed intent has required fields.
+
+        Args:
+            intent: Parsed intent dict
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        if intent.get("status") == "error":
+            return False, intent.get("error", "Unknown error")
+
+        action = intent.get("action", "").lower()
+        if not action:
+            return False, "No action detected (bridge, swap, or bridge_and_swap)"
+
+        # Validate action
+        valid_actions = ["bridge", "swap", "bridge_and_swap"]
+        if action not in valid_actions:
+            return False, f"Invalid action: {action}. Must be one of: {valid_actions}"
+
+        # Validate required fields based on action
+        amount = intent.get("amount")
+        if not amount or amount <= 0:
+            return False, "Invalid amount"
+
+        from_token = intent.get("from_token", "").upper()
+        if not from_token:
+            return False, "No source token specified"
+
+        supported_tokens = ["ETH", "USDC", "USDT", "WETH"]
+        if from_token not in supported_tokens:
+            return False, f"Unsupported token: {from_token}. Supported: {supported_tokens}"
+
+        from_chain = intent.get("from_chain", "").lower()
+        if not from_chain:
+            return False, "No source chain specified"
+
+        supported_chains = ["ethereum", "polygon", "arbitrum", "base", "optimism"]
+        if from_chain not in supported_chains:
+            return False, f"Unsupported chain: {from_chain}. Supported: {supported_chains}"
+
+        # Validate action-specific fields
+        if action in ["bridge", "bridge_and_swap"]:
+            to_chain = intent.get("to_chain", "").lower()
+            if not to_chain:
+                return False, f"Action {action} requires destination chain"
+            if to_chain not in supported_chains:
+                return False, f"Unsupported destination chain: {to_chain}"
+
+        if action in ["swap", "bridge_and_swap"]:
+            to_token = intent.get("to_token", "").upper()
+            if not to_token:
+                return False, f"Action {action} requires destination token"
+            if to_token not in supported_tokens:
+                return False, f"Unsupported destination token: {to_token}"
+
+        return True, ""
+
+
+async def test_intent_parser():
+    """Test intent parsing."""
+    import os
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        print("❌ OPENAI_API_KEY not set in .env")
+        return
+
+    print("\n" + "="*60)
+    print("🧪 Testing Intent Parser")
+    print("="*60)
+
+    parser = IntentParser(api_key)
+
+    test_messages = [
+        "Bridge 100 USDC from Ethereum to Polygon",
+        "Swap 50 USDC for USDT on Polygon",
+        "Move 100 USDC from eth to polygon and convert to USDT",
+        "Send 0.1 ETH to Base",
+    ]
+
+    for message in test_messages:
+        print(f"\n📝 Input: {message}")
+        result = await parser.parse_message(message)
+
+        if result.get("status") == "success":
+            print(f"✅ Action: {result.get('action')}")
+            print(f"   Amount: {result.get('amount')}")
+            print(f"   From: {result.get('from_token')} on {result.get('from_chain')}")
+            if result.get("to_token"):
+                print(f"   To: {result.get('to_token')} on {result.get('to_chain')}")
+            print(f"   Confidence: {result.get('confidence', 'N/A')}")
+
+            is_valid, error = parser.validate_intent(result)
+            if is_valid:
+                print(f"   ✓ Valid intent")
+            else:
+                print(f"   ✗ Invalid: {error}")
+        else:
+            print(f"❌ Error: {result.get('error')}")
+
+    print("\n✅ Intent parser test complete!\n")
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(test_intent_parser())

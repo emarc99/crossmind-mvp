@@ -415,9 +415,54 @@ class MeTTaReasoner:
         }
 
 
+# Global reasoner instance
+_metta_reasoner = None
 
+
+def get_metta_reasoner() -> MeTTaReasoner:
+    """Get or create global MeTTa reasoner instance"""
+    global _metta_reasoner
+    if _metta_reasoner is None:
+        _metta_reasoner = MeTTaReasoner()
+    return _metta_reasoner
+
+
+async def test_metta_reasoner():
+    """Test the MeTTa reasoner"""
+    reasoner = get_metta_reasoner()
+
+    test_messages = [
+        "Bridge 100 USDC from Ethereum to Polygon",
+        "Swap 50 USDC for USDT on Polygon",
+        "Move 100 USDC from eth to polygon and convert to USDT",
+        "Send 0.1 ETH to Base",
+        "What's the best rate for USDC to ETH?",
+    ]
+
+    print("\n" + "="*70)
+    print("MeTTa Reasoner Test")
+    print("="*70)
+
+    for message in test_messages:
+        print(f"\nInput: {message}")
+        result = await reasoner.reason_about_intent(message)
+
+        print(f"Status: {result.get('status')}")
+        print(f"Action: {result.get('action')}")
+        print(f"From: {result.get('from_token')} on {result.get('from_chain')}")
+        if result.get('to_token'):
+            print(f"To: {result.get('to_token')} on {result.get('to_chain')}")
+        print(f"Confidence: {result.get('confidence', 'N/A'):.2f}")
+
+        if result.get('reasoning_trace'):
+            print(f"Concepts extracted: {result['reasoning_trace']['concepts']}")
+
+    print("\n" + "="*70)
+    print("Reasoner Statistics:")
+    print(reasoner.get_statistics())
+    print("="*70 + "\n")
 
 
 if __name__ == "__main__":
-    # import asyncio
-    # asyncio.run(test_metta_reasoner())
+    import asyncio
+    asyncio.run(test_metta_reasoner())
